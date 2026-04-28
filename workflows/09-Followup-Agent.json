@@ -1,0 +1,369 @@
+{
+  "name": "09 - Follow-Up Sequence Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 🔁 FOLLOW-UP SEQUENCE AGENT\n\nRuns every 30 minutes. Performs three jobs:\n\n1. **Reply detection** — checks Gmail for inbound replies on every active thread.\n2. **Sentiment routing** — uses an AI agent to classify replies as Positive / Neutral / Negative / OOO / Unsubscribe and routes accordingly.\n3. **Follow-up sending** — for non-replied leads whose `next_followup_due_at` has passed, sends the next email in the sequence.\n\n**Why this exists:** 70% of replies in B2B come from follow-ups 2-4. Most teams skip them because manual follow-up is brutal. This agent never forgets.\n\n**Routing:**\n• Positive → Slack alert + Calendly link auto-reply + CRM hot lead\n• Negative → kill sequence, mark do-not-contact\n• OOO → pause sequence until OOO date + 1\n• Unsubscribe → mark suppressed forever",
+        "height": 460,
+        "width": 460,
+        "color": 4
+      },
+      "id": "note-fu-overview",
+      "name": "📌 Follow-Up Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, -200]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 30 }]
+        }
+      },
+      "id": "trigger-cron",
+      "name": "Every 30 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [340, 100]
+    },
+    {
+      "parameters": {},
+      "id": "trigger-input",
+      "name": "When Executed by Parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [340, 280]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT email, campaign_id, sequence, stage, next_followup_due_at FROM dropmeds_leads WHERE stage IN ('sent_t1','sent_t2','sent_t3') AND next_followup_due_at <= NOW() AND replied = FALSE AND unsubscribed = FALSE LIMIT 200;",
+        "options": {}
+      },
+      "id": "pg-due-leads",
+      "name": "🗄 Get Due Follow-ups",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [600, 200],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "filters": {
+          "q": "newer_than:1d in:inbox",
+          "labelIds": ["INBOX"]
+        },
+        "limit": 100
+      },
+      "id": "gmail-inbox",
+      "name": "📥 Gmail: Read Replies",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [600, 400],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_GMAIL_CRED_ID",
+          "name": "Gmail DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": { "__rl": true, "value": "gpt-4o-mini", "mode": "list" },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You are a senior sales operations analyst at DropMeds responsible for routing every inbound cold-email reply to the correct next action.\n\nClassify replies into ONE category:\n• POSITIVE → prospect shows interest, asks a question, says 'tell me more', requests a meeting, asks for pricing, asks for a demo.\n• NEUTRAL → prospect asks to follow up later, asks who you are, gives a soft 'maybe in Q3'.\n• NEGATIVE → 'not interested', 'wrong person', 'we're happy with X', 'stop emailing', anything dismissive.\n• OOO → auto-reply (out of office, vacation, parental leave). Extract return_date if present.\n• UNSUBSCRIBE → explicit opt-out: 'unsubscribe', 'remove me', 'GDPR'.\n• REFERRAL → prospect forwards you to someone else and names them.\n\nALSO extract:\n• meeting_intent (true/false)\n• detected_objection (string or null)\n• return_date (ISO date or null)\n• suggested_reply_action (string)\n\nReturn STRICT JSON only. No prose, no markdown."
+            },
+            {
+              "role": "user",
+              "content": "=Classify this inbound reply.\n\nFROM: {{ $json.From || ($json.payload && $json.payload.headers && $json.payload.headers.find(h=>h.name==='From') && $json.payload.headers.find(h=>h.name==='From').value) }}\nSUBJECT: {{ $json.Subject || ($json.payload && $json.payload.headers && $json.payload.headers.find(h=>h.name==='Subject') && $json.payload.headers.find(h=>h.name==='Subject').value) }}\nBODY: {{ ($json.snippet || $json.text || '').substring(0, 2000) }}\n\nReturn JSON in this EXACT schema:\n{\n  \"category\": \"POSITIVE\"|\"NEUTRAL\"|\"NEGATIVE\"|\"OOO\"|\"UNSUBSCRIBE\"|\"REFERRAL\",\n  \"meeting_intent\": <bool>,\n  \"detected_objection\": <string|null>,\n  \"return_date\": <ISO date string|null>,\n  \"referral_to\": <string|null>,\n  \"suggested_reply_action\": <string>\n}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": { "temperature": 0.1, "maxTokens": 400 }
+      },
+      "id": "ai-classify",
+      "name": "🤖 AI: Classify Reply",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [860, 400],
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_WITH_OPENAI_CRED_ID",
+          "name": "OpenAI DropMeds"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "outputKey": "positive",
+              "conditions": {
+                "options": { "typeValidation": "loose" },
+                "conditions": [
+                  { "id": "p1", "leftValue": "={{ $json.message.content && JSON.parse($json.message.content).category }}", "rightValue": "POSITIVE", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "outputKey": "negative",
+              "conditions": {
+                "options": { "typeValidation": "loose" },
+                "conditions": [
+                  { "id": "n1", "leftValue": "={{ $json.message.content && JSON.parse($json.message.content).category }}", "rightValue": "NEGATIVE", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "outputKey": "ooo",
+              "conditions": {
+                "options": { "typeValidation": "loose" },
+                "conditions": [
+                  { "id": "o1", "leftValue": "={{ $json.message.content && JSON.parse($json.message.content).category }}", "rightValue": "OOO", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "outputKey": "unsubscribe",
+              "conditions": {
+                "options": { "typeValidation": "loose" },
+                "conditions": [
+                  { "id": "u1", "leftValue": "={{ $json.message.content && JSON.parse($json.message.content).category }}", "rightValue": "UNSUBSCRIBE", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": { "fallbackOutput": "extra" }
+      },
+      "id": "switch-route",
+      "name": "🔀 Route by Sentiment",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [1100, 400]
+    },
+    {
+      "parameters": {
+        "channel": "#sales-hot-replies",
+        "text": "=🔥 *POSITIVE REPLY* — book this meeting now.\\nFrom: {{ $json.From }}\\nSubject: {{ $json.Subject }}\\nSnippet: {{ $json.snippet }}\\n👉 Calendly: https://calendly.com/dropmeds/discovery"
+      },
+      "id": "slack-positive",
+      "name": "💬 Slack: Hot Reply",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1340, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "REPLACE_WITH_SLACK_CRED_ID",
+          "name": "Slack DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE dropmeds_leads SET replied=TRUE, reply_sentiment='POSITIVE', stage='hot_reply', last_reply_at=NOW() WHERE email = $1;",
+        "options": { "queryReplacement": "={{ $json.From }}" }
+      },
+      "id": "pg-mark-positive",
+      "name": "🗄 Mark Positive",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1580, 200],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE dropmeds_leads SET replied=TRUE, reply_sentiment='NEGATIVE', stage='do_not_contact', do_not_contact=TRUE, last_reply_at=NOW() WHERE email = $1;",
+        "options": { "queryReplacement": "={{ $json.From }}" }
+      },
+      "id": "pg-mark-negative",
+      "name": "🗄 Mark Negative + DNC",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1340, 380],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE dropmeds_leads SET stage='paused_ooo', next_followup_due_at = COALESCE($2::timestamp, NOW() + INTERVAL '7 days') WHERE email = $1;",
+        "options": {
+          "queryReplacement": "={{ $json.From }},={{ JSON.parse($('🤖 AI: Classify Reply').item.json.message.content).return_date }}"
+        }
+      },
+      "id": "pg-pause-ooo",
+      "name": "🗄 Pause for OOO",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1340, 540],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE dropmeds_leads SET unsubscribed=TRUE, do_not_contact=TRUE, stage='unsubscribed' WHERE email = $1;",
+        "options": { "queryReplacement": "={{ $json.From }}" }
+      },
+      "id": "pg-unsub",
+      "name": "🗄 Mark Unsubscribed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1340, 700],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "### Follow-up Send Branch (right side of canvas)\n\nFor each due lead that hasn't replied: pick the next email in the sequence based on current stage, send via Gmail, log it, and advance the stage + next_followup_due_at.",
+        "height": 200,
+        "width": 360,
+        "color": 5
+      },
+      "id": "note-fu-send",
+      "name": "Note: Send Branch",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [820, -40]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Decide which touch to send next\nconst items = [];\nfor (const it of $input.all()) {\n  const lead = it.json;\n  let nextTouch = 2;\n  if (lead.stage === 'sent_t2') nextTouch = 3;\n  else if (lead.stage === 'sent_t3') nextTouch = 4;\n  let seq = lead.sequence;\n  if (typeof seq === 'string') { try { seq = JSON.parse(seq); } catch(e){ seq={}; } }\n  const body = seq['email_'+nextTouch] || '';\n  const subject = 'Re: ' + (seq.subject_a || 'following up');\n  items.push({ json: { ...lead, next_touch: nextTouch, send_subject: subject, send_body: body } });\n}\nreturn items;"
+      },
+      "id": "code-pick-touch",
+      "name": "🛠 Pick Next Touch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 100]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email }}",
+        "subject": "={{ $json.send_subject }}",
+        "emailType": "text",
+        "message": "={{ $json.send_body }}",
+        "options": {
+          "appendAttribution": false,
+          "replyTo": "={{ $env.DROPMEDS_REPLY_TO }}"
+        }
+      },
+      "id": "gmail-send-fu",
+      "name": "📨 Gmail: Send Follow-up",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1100, 100],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_GMAIL_CRED_ID",
+          "name": "Gmail DropMeds"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 4000
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO dropmeds_outreach_log (email, campaign_id, touch_number, subject, body, sent_at, mailbox) VALUES ($1,$2,$3,$4,$5,NOW(),$6);UPDATE dropmeds_leads SET stage=$7, last_touched_at=NOW(), next_followup_due_at = NOW() + ($8::int * INTERVAL '1 day') WHERE email=$1;",
+        "options": {
+          "queryReplacement": "={{ $json.email }},={{ $json.campaign_id }},={{ $json.next_touch }},={{ $json.send_subject }},={{ $json.send_body }},={{ $env.DROPMEDS_PRIMARY_MAILBOX }},={{ 'sent_t' + $json.next_touch }},={{ $json.next_touch === 2 ? 4 : ($json.next_touch === 3 ? 7 : 999) }}"
+        }
+      },
+      "id": "pg-log-fu",
+      "name": "🗄 Log + Advance Stage",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1340, 100],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 30 min": {
+      "main": [
+        [
+          { "node": "🗄 Get Due Follow-ups", "type": "main", "index": 0 },
+          { "node": "📥 Gmail: Read Replies", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "When Executed by Parent": {
+      "main": [
+        [
+          { "node": "🗄 Get Due Follow-ups", "type": "main", "index": 0 },
+          { "node": "📥 Gmail: Read Replies", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "🗄 Get Due Follow-ups": {
+      "main": [[{ "node": "🛠 Pick Next Touch", "type": "main", "index": 0 }]]
+    },
+    "🛠 Pick Next Touch": {
+      "main": [[{ "node": "📨 Gmail: Send Follow-up", "type": "main", "index": 0 }]]
+    },
+    "📨 Gmail: Send Follow-up": {
+      "main": [[{ "node": "🗄 Log + Advance Stage", "type": "main", "index": 0 }]]
+    },
+    "📥 Gmail: Read Replies": {
+      "main": [[{ "node": "🤖 AI: Classify Reply", "type": "main", "index": 0 }]]
+    },
+    "🤖 AI: Classify Reply": {
+      "main": [[{ "node": "🔀 Route by Sentiment", "type": "main", "index": 0 }]]
+    },
+    "🔀 Route by Sentiment": {
+      "main": [
+        [{ "node": "💬 Slack: Hot Reply", "type": "main", "index": 0 }],
+        [{ "node": "🗄 Mark Negative + DNC", "type": "main", "index": 0 }],
+        [{ "node": "🗄 Pause for OOO", "type": "main", "index": 0 }],
+        [{ "node": "🗄 Mark Unsubscribed", "type": "main", "index": 0 }]
+      ]
+    },
+    "💬 Slack: Hot Reply": {
+      "main": [[{ "node": "🗄 Mark Positive", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1", "saveExecutionProgress": true },
+  "tags": [{ "name": "DropMeds" }, { "name": "Follow-Up" }]
+}

@@ -1,0 +1,133 @@
+{
+  "name": "05 - Email Verification Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## ✉️ EMAIL VERIFICATION AGENT\n\nProtects sender reputation by verifying every email before it's sent. Uses NeverBounce as primary, with MillionVerifier fallback.\n\n**Why this exists:** A 5%+ bounce rate triggers Google/Microsoft to throttle or blacklist your sending domain. One bad list can torch a 6-month-old warmed-up inbox.\n\n**Logic:**\n1. Hit primary verifier API\n2. If API down → fallback to secondary\n3. If both down → mark `unknown` and skip (Orchestrator filters these)\n4. Cache result on lead row to avoid re-verifying same address\n\n**Result mapping:**\n- valid → proceed\n- catchall (with high confidence) → proceed but flag\n- invalid / unknown / disposable / role → skip",
+        "height": 460,
+        "width": 460,
+        "color": 4
+      },
+      "id": "note-verify-overview",
+      "name": "📌 Verification Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, -200]
+    },
+    {
+      "parameters": {},
+      "id": "trigger-input",
+      "name": "When Executed by Parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [340, 280]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.neverbounce.com/v4/single/check",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "key", "value": "={{ $env.NEVERBOUNCE_API_KEY }}" },
+            { "name": "email", "value": "={{ $json.email }}" }
+          ]
+        },
+        "options": {
+          "timeout": 15000,
+          "response": { "response": { "neverError": true } }
+        }
+      },
+      "id": "http-neverbounce",
+      "name": "📡 NeverBounce Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, 200],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.millionverifier.com/api/v3/",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "api", "value": "={{ $env.MILLIONVERIFIER_API_KEY }}" },
+            { "name": "email", "value": "={{ $('When Executed by Parent').item.json.email }}" },
+            { "name": "timeout", "value": "10" }
+          ]
+        },
+        "options": { "timeout": 15000, "response": { "response": { "neverError": true } } }
+      },
+      "id": "http-mv-fallback",
+      "name": "📡 MillionVerifier Fallback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, 380],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('When Executed by Parent').item.json;\nconst nb = $('📡 NeverBounce Check').item ? $('📡 NeverBounce Check').item.json : null;\nconst mv = $('📡 MillionVerifier Fallback').item ? $('📡 MillionVerifier Fallback').item.json : null;\n\nlet status = 'unknown';\nlet provider = 'none';\nlet confidence = 0;\n\nif (nb && nb.result) {\n  provider = 'neverbounce';\n  switch (nb.result) {\n    case 'valid': status='valid'; confidence=95; break;\n    case 'catchall': status='catchall'; confidence=70; break;\n    case 'invalid': status='invalid'; confidence=98; break;\n    case 'disposable': status='disposable'; confidence=98; break;\n    case 'unknown': status='unknown'; confidence=30; break;\n  }\n} else if (mv && mv.result) {\n  provider = 'millionverifier';\n  const r = (mv.result || '').toLowerCase();\n  if (r === 'ok' || r === 'good') { status='valid'; confidence=90; }\n  else if (r === 'catch_all' || r === 'catchall') { status='catchall'; confidence=65; }\n  else if (r === 'bad' || r === 'invalid') { status='invalid'; confidence=95; }\n  else if (r === 'disposable') { status='disposable'; confidence=95; }\n  else { status='unknown'; confidence=30; }\n}\n\nreturn [{ json: { ...lead, email_status: status, email_verify_provider: provider, email_confidence: confidence } }];"
+      },
+      "id": "code-normalize",
+      "name": "🛠 Normalize Verification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 280]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": { "__rl": true, "value": "public", "mode": "list" },
+        "table": { "__rl": true, "value": "dropmeds_leads", "mode": "list" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "email_status": "={{ $json.email_status }}",
+            "email_verify_provider": "={{ $json.email_verify_provider }}",
+            "email_confidence": "={{ $json.email_confidence }}",
+            "stage": "verified"
+          },
+          "matchingColumns": ["email"]
+        },
+        "options": {}
+      },
+      "id": "pg-update",
+      "name": "🗄 Postgres: Save Verification",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1100, 280],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "When Executed by Parent": {
+      "main": [[{ "node": "📡 NeverBounce Check", "type": "main", "index": 0 }]]
+    },
+    "📡 NeverBounce Check": {
+      "main": [
+        [{ "node": "🛠 Normalize Verification", "type": "main", "index": 0 }],
+        [{ "node": "📡 MillionVerifier Fallback", "type": "main", "index": 0 }]
+      ]
+    },
+    "📡 MillionVerifier Fallback": {
+      "main": [[{ "node": "🛠 Normalize Verification", "type": "main", "index": 0 }]]
+    },
+    "🛠 Normalize Verification": {
+      "main": [[{ "node": "🗄 Postgres: Save Verification", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1", "saveExecutionProgress": true },
+  "tags": [{ "name": "DropMeds" }, { "name": "Email-Verification" }]
+}

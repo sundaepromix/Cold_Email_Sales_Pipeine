@@ -1,0 +1,262 @@
+{
+  "name": "08 - Outreach Sender Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 📤 OUTREACH SENDER AGENT\n\nSends Email #1 via Gmail (or SMTP) and registers the prospect into the follow-up scheduler.\n\n**Why this exists:** Sending logic is where most teams kill their domain. This agent enforces:\n• Daily send caps per inbox\n• Random human-like jitter (30s–4m) between sends\n• A/B subject line rotation\n• UTM tracking pixel + reply-to header\n• Automatic skip if already sent within 90 days\n\n**Output to next agent:**\n- message_id (gmail thread id)\n- sent_at\n- subject_used (a or b)\n- next_followup_due_at",
+        "height": 460,
+        "width": 460,
+        "color": 4
+      },
+      "id": "note-send-overview",
+      "name": "📌 Sender Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, -200]
+    },
+    {
+      "parameters": {},
+      "id": "trigger-input",
+      "name": "When Executed by Parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [340, 280]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*)::int AS sent_today FROM dropmeds_outreach_log WHERE DATE(sent_at) = CURRENT_DATE AND mailbox = $1;",
+        "options": { "queryReplacement": "={{ $env.DROPMEDS_PRIMARY_MAILBOX }}" }
+      },
+      "id": "pg-cap-check",
+      "name": "🗄 Postgres: Daily Cap Check",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [600, 280],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "cap1",
+              "leftValue": "={{ $json.sent_today }}",
+              "rightValue": "={{ $env.DROPMEDS_DAILY_CAP || 80 }}",
+              "operator": { "type": "number", "operation": "lt" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-cap-ok",
+      "name": "🚦 Under Daily Cap?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [840, 280]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Random human-like delay 30-240s\nconst min = 30, max = 240;\nconst secs = Math.floor(Math.random()*(max-min)+min);\nreturn [{ json: { ...$('When Executed by Parent').item.json, jitter_seconds: secs } }];"
+      },
+      "id": "code-jitter",
+      "name": "🛠 Calc Send Jitter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1080, 200]
+    },
+    {
+      "parameters": {
+        "amount": "={{ $json.jitter_seconds }}",
+        "unit": "seconds"
+      },
+      "id": "wait-jitter",
+      "name": "⏱ Wait (human jitter)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1320, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Choose subject A or B 50/50\nconst lead = $('When Executed by Parent').item.json;\nconst seq = lead.sequence || {};\nconst pickB = Math.random() < 0.5;\nconst subject = pickB ? (seq.subject_b || seq.subject_a) : (seq.subject_a || seq.subject_b);\nconst body = (seq.email_1 || '') + '\\n\\n— ' + ($env && $env.DROPMEDS_SENDER_NAME ? $env.DROPMEDS_SENDER_NAME : 'The DropMeds Team') + (seq && seq.compliance ? '' : '');\nconst pixel = '<img src=\"https://track.dropmeds.io/p/' + encodeURIComponent(lead.email) + '/' + encodeURIComponent(lead.campaign_id) + '.gif\" width=\"1\" height=\"1\" style=\"display:none\"/>';\nconst html = body.replace(/\\n/g,'<br>') + pixel;\nreturn [{ json: { ...lead, send_subject: subject, send_subject_variant: pickB ? 'B' : 'A', send_body_html: html, send_body_text: body } }];"
+      },
+      "id": "code-build-email",
+      "name": "🛠 Build Email Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email }}",
+        "subject": "={{ $json.send_subject }}",
+        "emailType": "html",
+        "message": "={{ $json.send_body_html }}",
+        "options": {
+          "appendAttribution": false,
+          "replyTo": "={{ $env.DROPMEDS_REPLY_TO || $env.DROPMEDS_PRIMARY_MAILBOX }}"
+        }
+      },
+      "id": "gmail-send",
+      "name": "📨 Gmail: Send Email 1",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1800, 200],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_GMAIL_CRED_ID",
+          "name": "Gmail DropMeds"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": { "__rl": true, "value": "public", "mode": "list" },
+        "table": { "__rl": true, "value": "dropmeds_outreach_log", "mode": "list" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "email": "={{ $json.email }}",
+            "campaign_id": "={{ $json.campaign_id }}",
+            "touch_number": 1,
+            "subject": "={{ $json.send_subject }}",
+            "subject_variant": "={{ $json.send_subject_variant }}",
+            "body": "={{ $json.send_body_text }}",
+            "message_id": "={{ $json.id }}",
+            "thread_id": "={{ $json.threadId }}",
+            "mailbox": "={{ $env.DROPMEDS_PRIMARY_MAILBOX }}",
+            "sent_at": "={{ $now.toISO() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "pg-log",
+      "name": "🗄 Postgres: Log Send",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2040, 200],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": { "__rl": true, "value": "public", "mode": "list" },
+        "table": { "__rl": true, "value": "dropmeds_leads", "mode": "list" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "stage": "sent_t1",
+            "last_touched_at": "={{ $now.toISO() }}",
+            "next_followup_due_at": "={{ $now.plus({days: 3}).toISO() }}"
+          },
+          "matchingColumns": ["email"]
+        },
+        "options": {}
+      },
+      "id": "pg-update-lead",
+      "name": "🗄 Postgres: Update Lead Stage",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2280, 200],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#sales-ops-alerts",
+        "text": "=⛔ Daily send cap reached on mailbox {{ $env.DROPMEDS_PRIMARY_MAILBOX }}. Lead {{ $('When Executed by Parent').item.json.email }} re-queued for tomorrow."
+      },
+      "id": "slack-cap",
+      "name": "💬 Slack: Cap Reached",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1080, 380],
+      "credentials": {
+        "slackApi": {
+          "id": "REPLACE_WITH_SLACK_CRED_ID",
+          "name": "Slack DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": { "__rl": true, "value": "public", "mode": "list" },
+        "table": { "__rl": true, "value": "dropmeds_leads", "mode": "list" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "stage": "queued_for_tomorrow",
+            "next_followup_due_at": "={{ $now.plus({days: 1}).toISO() }}"
+          },
+          "matchingColumns": ["email"]
+        },
+        "options": {}
+      },
+      "id": "pg-requeue",
+      "name": "🗄 Postgres: Requeue Lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1320, 380],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "When Executed by Parent": {
+      "main": [[{ "node": "🗄 Postgres: Daily Cap Check", "type": "main", "index": 0 }]]
+    },
+    "🗄 Postgres: Daily Cap Check": {
+      "main": [[{ "node": "🚦 Under Daily Cap?", "type": "main", "index": 0 }]]
+    },
+    "🚦 Under Daily Cap?": {
+      "main": [
+        [{ "node": "🛠 Calc Send Jitter", "type": "main", "index": 0 }],
+        [{ "node": "💬 Slack: Cap Reached", "type": "main", "index": 0 }]
+      ]
+    },
+    "💬 Slack: Cap Reached": {
+      "main": [[{ "node": "🗄 Postgres: Requeue Lead", "type": "main", "index": 0 }]]
+    },
+    "🛠 Calc Send Jitter": {
+      "main": [[{ "node": "⏱ Wait (human jitter)", "type": "main", "index": 0 }]]
+    },
+    "⏱ Wait (human jitter)": {
+      "main": [[{ "node": "🛠 Build Email Payload", "type": "main", "index": 0 }]]
+    },
+    "🛠 Build Email Payload": {
+      "main": [[{ "node": "📨 Gmail: Send Email 1", "type": "main", "index": 0 }]]
+    },
+    "📨 Gmail: Send Email 1": {
+      "main": [[{ "node": "🗄 Postgres: Log Send", "type": "main", "index": 0 }]]
+    },
+    "🗄 Postgres: Log Send": {
+      "main": [[{ "node": "🗄 Postgres: Update Lead Stage", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1", "saveExecutionProgress": true },
+  "tags": [{ "name": "DropMeds" }, { "name": "Outreach-Sender" }]
+}

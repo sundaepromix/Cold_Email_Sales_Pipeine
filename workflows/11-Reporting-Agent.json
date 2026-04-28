@@ -1,0 +1,211 @@
+{
+  "name": "11 - Analytics & Reporting Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 📊 ANALYTICS & REPORTING AGENT\n\nProduces three artifacts every run:\n\n1. **Real-time campaign rollup** — sourced, qualified, sent, replied, meetings.\n2. **Daily Slack digest** at 6 PM (CRON-triggered) — funnel + reply leaderboard.\n3. **AI-written executive summary** — what worked, what failed, what to ship next.\n\n**Why this exists:** Numbers without narrative are noise. The AI commentary turns raw funnel data into a 5-bullet decision memo for the founder/sales lead.",
+        "height": 380,
+        "width": 460,
+        "color": 4
+      },
+      "id": "note-rep-overview",
+      "name": "📌 Reporting Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, -200]
+    },
+    {
+      "parameters": {},
+      "id": "trigger-input",
+      "name": "When Executed by Parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [340, 100]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 18 * * 1-5" }]
+        }
+      },
+      "id": "trigger-daily",
+      "name": "Daily Cron 6PM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [340, 280]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  COUNT(*) FILTER (WHERE stage = 'sourced') AS total_sourced,\n  COUNT(*) FILTER (WHERE stage IN ('qualified','enriched','verified','personalized','sequence_ready','sent_t1','sent_t2','sent_t3','sent_t4','hot_reply')) AS total_qualified,\n  COUNT(*) FILTER (WHERE stage LIKE 'sent_t%') AS emails_sent,\n  COUNT(*) FILTER (WHERE replied = TRUE) AS replies,\n  COUNT(*) FILTER (WHERE reply_sentiment = 'POSITIVE') AS hot_replies,\n  COUNT(*) FILTER (WHERE reply_sentiment = 'NEGATIVE') AS negative_replies,\n  COUNT(*) FILTER (WHERE unsubscribed = TRUE) AS unsubscribes,\n  COALESCE(ROUND(100.0 * COUNT(*) FILTER (WHERE replied=TRUE) / NULLIF(COUNT(*) FILTER (WHERE stage LIKE 'sent_t%'),0), 2), 0) AS reply_rate_pct,\n  COALESCE(ROUND(100.0 * COUNT(*) FILTER (WHERE reply_sentiment='POSITIVE') / NULLIF(COUNT(*) FILTER (WHERE replied=TRUE),0), 2), 0) AS positive_rate_pct\nFROM dropmeds_leads\nWHERE created_at >= NOW() - INTERVAL '7 days';",
+        "options": {}
+      },
+      "id": "pg-funnel",
+      "name": "🗄 Postgres: Funnel Stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [600, 200],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT subject_variant, COUNT(*) AS sent, COUNT(*) FILTER (WHERE l.replied = TRUE) AS replies FROM dropmeds_outreach_log o JOIN dropmeds_leads l ON l.email = o.email WHERE o.sent_at >= NOW() - INTERVAL '7 days' GROUP BY subject_variant;",
+        "options": {}
+      },
+      "id": "pg-ab",
+      "name": "🗄 Postgres: A/B Stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [600, 360],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": { "__rl": true, "value": "gpt-4o", "mode": "list" },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You are a Head of RevOps and ex-McKinsey analyst. You read raw cold-email funnel data and produce a 5-bullet weekly decision memo for the CEO of DropMeds. \n\nRULES:\n1. Start every bullet with a verb: 'Ship', 'Kill', 'Test', 'Double', 'Investigate'.\n2. Each bullet ≤ 22 words.\n3. Cite exact numbers from the data.\n4. NEVER speculate without saying 'hypothesis:'.\n5. Last bullet must be the single most important next action for the next 7 days.\n6. Output STRICT JSON, no prose, no markdown."
+            },
+            {
+              "role": "user",
+              "content": "=Funnel data (last 7 days):\n{{ JSON.stringify($('🗄 Postgres: Funnel Stats').item.json) }}\n\nA/B subject test data:\n{{ JSON.stringify($('🗄 Postgres: A/B Stats').all().map(i=>i.json)) }}\n\nReturn JSON:\n{\n  \"headline\": \"<one-line summary>\",\n  \"bullets\": [\"<verb-led bullet>\", \"...\", \"...\", \"...\", \"<#1 next action>\"]\n}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": { "temperature": 0.3, "maxTokens": 600 }
+      },
+      "id": "ai-memo",
+      "name": "🤖 AI: Exec Memo",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [860, 280],
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_WITH_OPENAI_CRED_ID",
+          "name": "OpenAI DropMeds"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3
+    },
+    {
+      "parameters": {
+        "jsCode": "const f = $('🗄 Postgres: Funnel Stats').item.json;\nlet memo = $input.first().json;\nif (memo && memo.message && memo.message.content) {\n  try { memo = typeof memo.message.content==='string' ? JSON.parse(memo.message.content) : memo.message.content; } catch(e) { memo = { headline:'', bullets:[] }; }\n}\nconst bullets = (memo.bullets||[]).map(b=>'• '+b).join('\\n');\nconst text = `📊 *DropMeds Weekly Sales OS Report*\\n\\n*Headline:* ${memo.headline||'—'}\\n\\n*Funnel (last 7d)*\\n• Sourced: ${f.total_sourced}\\n• Qualified: ${f.total_qualified}\\n• Emails sent: ${f.emails_sent}\\n• Replies: ${f.replies} (${f.reply_rate_pct}%)\\n• Hot replies: ${f.hot_replies}\\n• Negative: ${f.negative_replies}\\n• Unsubscribes: ${f.unsubscribes}\\n\\n*Decisions for next 7 days:*\\n${bullets}`;\nreturn [{ json: { ...f, memo, slack_text: text, total_sourced: f.total_sourced, total_qualified: f.total_qualified, emails_sent: f.emails_sent, replies: f.replies, meetings_booked: f.hot_replies, campaign_id: ($('When Executed by Parent').item ? $('When Executed by Parent').item.json.campaign_id : 'scheduled') } }];"
+      },
+      "id": "code-build-report",
+      "name": "🛠 Build Slack Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 280]
+    },
+    {
+      "parameters": {
+        "channel": "#sales-ops-reports",
+        "text": "={{ $json.slack_text }}"
+      },
+      "id": "slack-report",
+      "name": "💬 Slack: Weekly Report",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1340, 280],
+      "credentials": {
+        "slackApi": {
+          "id": "REPLACE_WITH_SLACK_CRED_ID",
+          "name": "Slack DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Funnel-Daily",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "date": "={{ $now.toFormat('yyyy-MM-dd') }}",
+            "campaign_id": "={{ $json.campaign_id }}",
+            "sourced": "={{ $json.total_sourced }}",
+            "qualified": "={{ $json.total_qualified }}",
+            "sent": "={{ $json.emails_sent }}",
+            "replies": "={{ $json.replies }}",
+            "hot_replies": "={{ $json.hot_replies }}",
+            "reply_rate_pct": "={{ $json.reply_rate_pct }}"
+          },
+          "matchingColumns": ["date","campaign_id"]
+        },
+        "options": {}
+      },
+      "id": "sheet-log",
+      "name": "📈 Google Sheets: Append Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1580, 280],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "REPLACE_WITH_GSHEETS_CRED_ID",
+          "name": "Google Sheets DropMeds"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "When Executed by Parent": {
+      "main": [
+        [
+          { "node": "🗄 Postgres: Funnel Stats", "type": "main", "index": 0 },
+          { "node": "🗄 Postgres: A/B Stats", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Daily Cron 6PM": {
+      "main": [
+        [
+          { "node": "🗄 Postgres: Funnel Stats", "type": "main", "index": 0 },
+          { "node": "🗄 Postgres: A/B Stats", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "🗄 Postgres: Funnel Stats": {
+      "main": [[{ "node": "🤖 AI: Exec Memo", "type": "main", "index": 0 }]]
+    },
+    "🗄 Postgres: A/B Stats": {
+      "main": [[{ "node": "🤖 AI: Exec Memo", "type": "main", "index": 0 }]]
+    },
+    "🤖 AI: Exec Memo": {
+      "main": [[{ "node": "🛠 Build Slack Report", "type": "main", "index": 0 }]]
+    },
+    "🛠 Build Slack Report": {
+      "main": [
+        [
+          { "node": "💬 Slack: Weekly Report", "type": "main", "index": 0 },
+          { "node": "📈 Google Sheets: Append Row", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1", "saveExecutionProgress": true },
+  "tags": [{ "name": "DropMeds" }, { "name": "Reporting" }]
+}

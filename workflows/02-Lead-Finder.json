@@ -1,0 +1,331 @@
+{
+  "name": "02 - Lead Finder Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 🔎 LEAD FINDER AGENT\n\nSources raw prospects from Apollo.io (primary) with optional Apify LinkedIn fallback.\n\n**Why this exists:** Stop wasting SDR hours scraping lists. The agent translates the ICP definition into Apollo-compatible filters and pulls a fresh, deduped list of prospects each run.\n\n**Inputs (from Orchestrator):**\n- icp.industry, icp.employee_range, icp.titles, icp.geos, icp.tech_stack\n- daily_send_limit (caps lead pull volume)\n\n**Outputs (per item):**\n- email, first_name, last_name, full_name, title\n- company_name, company_domain, company_size, industry, country\n- linkedin_url, source\n\n**Quality controls:**\n- Dedupe against PostgreSQL `dropmeds_leads` table\n- Ignore role-based emails (info@, sales@, etc.)\n- Retry x3 on Apollo 5xx",
+        "height": 460,
+        "width": 460,
+        "color": 4
+      },
+      "id": "note-finder-overview",
+      "name": "📌 Lead Finder Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, -200]
+    },
+    {
+      "parameters": {},
+      "id": "trigger-input",
+      "name": "When Executed by Parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [340, 280]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You are an elite outbound sales strategist and B2B prospecting operator. Your job is to convert a high-level Ideal Customer Profile (ICP) into precise Apollo.io search parameters that will return high-fit B2B prospects.\n\nYou ALWAYS think like a senior SDR leader: prioritize decision-makers, exclude obvious non-fits, and respect signal density (a list of 100 perfect-fit leads beats 1,000 weak ones).\n\nRULES:\n1. Convert titles to Apollo's `person_titles` array (use both senior and adjacent variants).\n2. Map company size to `organization_num_employees_ranges` Apollo strings (e.g. \"50,500\").\n3. Map geos to `person_locations` (city/state/country names Apollo recognizes).\n4. Map tech_stack to `q_organization_keyword_tags` for technographic filtering.\n5. Exclude obvious non-fits (students, interns, advisors, freelancers).\n6. NEVER invent fields Apollo does not support.\n7. Output ONLY valid JSON matching the required schema. No prose, no markdown."
+            },
+            {
+              "role": "user",
+              "content": "=Convert this ICP into Apollo.io search parameters.\n\nICP JSON:\n{{ JSON.stringify($json.icp) }}\n\ndaily_send_limit (max leads to return): {{ $json.daily_send_limit }}\n\nReturn JSON in this exact schema:\n{\n  \"person_titles\": [\"...\"],\n  \"person_locations\": [\"...\"],\n  \"organization_num_employees_ranges\": [\"...\"],\n  \"q_organization_keyword_tags\": [\"...\"],\n  \"per_page\": <int, max 100, capped at daily_send_limit * 2>,\n  \"page\": 1,\n  \"exclude_titles\": [\"intern\",\"student\",\"freelance\",\"advisor\"]\n}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {
+          "temperature": 0.2,
+          "maxTokens": 800
+        }
+      },
+      "id": "ai-icp-to-apollo",
+      "name": "🤖 AI: ICP → Apollo Query",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [600, 280],
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_WITH_OPENAI_CRED_ID",
+          "name": "OpenAI DropMeds"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.apollo.io/api/v1/mixed_people/search",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Cache-Control", "value": "no-cache" },
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "X-Api-Key", "value": "={{ $credentials.apolloApiKey || $env.APOLLO_API_KEY }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.message.content ? JSON.parse($json.message.content) : $json) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "http-apollo",
+      "name": "📡 Apollo: Search People",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 280],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "people",
+        "options": {}
+      },
+      "id": "split-people",
+      "name": "Split People",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [1100, 280]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "f1", "name": "first_name", "value": "={{ $json.first_name }}", "type": "string" },
+            { "id": "f2", "name": "last_name", "value": "={{ $json.last_name }}", "type": "string" },
+            { "id": "f3", "name": "full_name", "value": "={{ $json.name }}", "type": "string" },
+            { "id": "f4", "name": "title", "value": "={{ $json.title }}", "type": "string" },
+            { "id": "f5", "name": "email", "value": "={{ $json.email }}", "type": "string" },
+            { "id": "f6", "name": "linkedin_url", "value": "={{ $json.linkedin_url }}", "type": "string" },
+            { "id": "f7", "name": "company_name", "value": "={{ $json.organization && $json.organization.name }}", "type": "string" },
+            { "id": "f8", "name": "company_domain", "value": "={{ $json.organization && $json.organization.primary_domain }}", "type": "string" },
+            { "id": "f9", "name": "company_size", "value": "={{ $json.organization && $json.organization.estimated_num_employees }}", "type": "number" },
+            { "id": "f10", "name": "industry", "value": "={{ $json.organization && $json.organization.industry }}", "type": "string" },
+            { "id": "f11", "name": "country", "value": "={{ $json.country }}", "type": "string" },
+            { "id": "f12", "name": "source", "value": "apollo", "type": "string" },
+            { "id": "f13", "name": "campaign_id", "value": "={{ $('When Executed by Parent').item.json.campaign_id }}", "type": "string" },
+            { "id": "f14", "name": "sourced_at", "value": "={{ $now.toISO() }}", "type": "string" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-normalize",
+      "name": "🛠 Normalize Lead",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1340, 280]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose", "caseSensitive": false },
+          "conditions": [
+            {
+              "id": "fc1",
+              "leftValue": "={{ $json.email }}",
+              "rightValue": "^(info|sales|hello|contact|admin|support|noreply|no-reply|press|jobs|careers)@",
+              "operator": { "type": "string", "operation": "notRegex" }
+            },
+            {
+              "id": "fc2",
+              "leftValue": "={{ $json.email }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-valid-email-shape",
+      "name": "🚦 Filter Role Emails",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1580, 280]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT 1 FROM dropmeds_leads WHERE LOWER(email) = LOWER($1) LIMIT 1;",
+        "options": {
+          "queryReplacement": "={{ $json.email }}"
+        }
+      },
+      "id": "pg-dedupe-check",
+      "name": "🗄 Postgres: Dedupe Check",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1820, 200],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "dc1",
+              "leftValue": "={{ $json['?column?'] }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "empty" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-not-duplicate",
+      "name": "🚦 IF Not Duplicate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [2060, 200]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": { "__rl": true, "value": "public", "mode": "list" },
+        "table": { "__rl": true, "value": "dropmeds_leads", "mode": "list" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "email": "={{ $json.email }}",
+            "first_name": "={{ $json.first_name }}",
+            "last_name": "={{ $json.last_name }}",
+            "title": "={{ $json.title }}",
+            "company_name": "={{ $json.company_name }}",
+            "company_domain": "={{ $json.company_domain }}",
+            "linkedin_url": "={{ $json.linkedin_url }}",
+            "industry": "={{ $json.industry }}",
+            "company_size": "={{ $json.company_size }}",
+            "country": "={{ $json.country }}",
+            "source": "={{ $json.source }}",
+            "campaign_id": "={{ $json.campaign_id }}",
+            "stage": "sourced",
+            "created_at": "={{ $now.toISO() }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "pg-insert",
+      "name": "🗄 Postgres: Insert Lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2300, 100],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "### Error Fallback\n\nIf Apollo fails after 3 retries, log the failure and return empty array so downstream agents skip gracefully. Slack alert tells the SalesOps team to check API quota.",
+        "height": 200,
+        "width": 320,
+        "color": 3
+      },
+      "id": "note-error",
+      "name": "Note: Error Handling",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [860, 540]
+    },
+    {
+      "parameters": {
+        "channel": "#sales-ops-alerts",
+        "text": "=🚨 Lead Finder failure — Apollo API down or quota exhausted.\\nCampaign: {{ $('When Executed by Parent').item.json.campaign_id }}\\nError: {{ $json.error || 'unknown' }}",
+        "otherOptions": {}
+      },
+      "id": "slack-error",
+      "name": "💬 Slack: Apollo Error",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1100, 540],
+      "credentials": {
+        "slackApi": {
+          "id": "REPLACE_WITH_SLACK_CRED_ID",
+          "name": "Slack DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 1,
+        "unit": "seconds"
+      },
+      "id": "wait-throttle",
+      "name": "⏱ Throttle 1s",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [2540, 100]
+    }
+  ],
+  "connections": {
+    "When Executed by Parent": {
+      "main": [[{ "node": "🤖 AI: ICP → Apollo Query", "type": "main", "index": 0 }]]
+    },
+    "🤖 AI: ICP → Apollo Query": {
+      "main": [[{ "node": "📡 Apollo: Search People", "type": "main", "index": 0 }]]
+    },
+    "📡 Apollo: Search People": {
+      "main": [
+        [{ "node": "Split People", "type": "main", "index": 0 }],
+        [{ "node": "💬 Slack: Apollo Error", "type": "main", "index": 0 }]
+      ]
+    },
+    "Split People": {
+      "main": [[{ "node": "🛠 Normalize Lead", "type": "main", "index": 0 }]]
+    },
+    "🛠 Normalize Lead": {
+      "main": [[{ "node": "🚦 Filter Role Emails", "type": "main", "index": 0 }]]
+    },
+    "🚦 Filter Role Emails": {
+      "main": [
+        [{ "node": "🗄 Postgres: Dedupe Check", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "🗄 Postgres: Dedupe Check": {
+      "main": [[{ "node": "🚦 IF Not Duplicate", "type": "main", "index": 0 }]]
+    },
+    "🚦 IF Not Duplicate": {
+      "main": [
+        [{ "node": "🗄 Postgres: Insert Lead", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "🗄 Postgres: Insert Lead": {
+      "main": [[{ "node": "⏱ Throttle 1s", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true
+  },
+  "tags": [
+    { "name": "DropMeds" },
+    { "name": "Lead-Finder" }
+  ]
+}

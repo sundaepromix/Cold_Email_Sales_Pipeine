@@ -1,0 +1,136 @@
+{
+  "name": "03 - Qualification Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## ✅ QUALIFICATION AGENT\n\nScores every lead against the ICP and assigns a `fit_score` (0–100) plus tier.\n\n**Why this exists:** Sending to weak-fit leads wastes deliverability budget and drags reply rates. This agent acts as a senior SDR manager reviewing every prospect before they enter the funnel.\n\n**Scoring Rubric (built into prompt):**\n- Title seniority match (0–25)\n- Industry match (0–20)\n- Company size match (0–20)\n- Geo match (0–10)\n- Tech-stack match (0–15)\n- Negative signals (-0..-15) e.g. recent layoffs, irrelevant function\n\n**Output:**\n- fit_score (int)\n- tier ('A'|'B'|'C'|'D')\n- reasoning (string, 1–2 sentences)\n- pain_hypothesis (string, used downstream by Personalization)",
+        "height": 460,
+        "width": 460,
+        "color": 4
+      },
+      "id": "note-qual-overview",
+      "name": "📌 Qualification Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, -200]
+    },
+    {
+      "parameters": {},
+      "id": "trigger-input",
+      "name": "When Executed by Parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [340, 280]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You are a senior SDR Manager and Revenue Operations leader at DropMeds, responsible for protecting the team's deliverability and reply rates. Your sole job: score B2B prospects against the Ideal Customer Profile and decide whether they enter the outbound sequence.\n\nDropMeds sells an AI-powered cold email sales operating system to mid-market B2B SaaS companies. Our highest-converting buyer is a VP of Sales, Head of Sales, CRO, or Director of Revenue Operations at a 50–500 employee SaaS company in NA/UK using HubSpot, Salesforce, Outreach, or Apollo.\n\nYou MUST follow this scoring rubric exactly:\n\n• Title seniority & function match → 0–25 points\n  - 25: VP/CRO/Head of Sales, Head of RevOps\n  - 18: Director Sales/RevOps, Sales Operations Manager\n  - 10: Senior Manager Sales, Account Executive Lead\n  - 0: IC contributor, marketing, support, engineering, finance\n\n• Industry match → 0–20 points\n  - 20: B2B SaaS / cloud software\n  - 12: B2B services adjacent (cybersecurity, fintech SaaS, martech)\n  - 5: B2B but non-SaaS\n  - 0: B2C, agencies under 20 staff, government\n\n• Company size match → 0–20 points\n  - 20: 50–500 employees\n  - 12: 20–49 or 501–1000\n  - 5: 1001–5000\n  - 0: <20 or >5000\n\n• Geo match → 0–10 points\n  - 10: USA, Canada, United Kingdom\n  - 6: Australia, Ireland, Western Europe\n  - 2: rest of EU\n  - 0: other regions\n\n• Tech-stack match → 0–15 points (use clues from title, company industry)\n  - 15: known to use HubSpot/Salesforce/Outreach/Apollo\n  - 8: likely uses one based on industry/role\n  - 0: unknown / irrelevant stack\n\n• Negative signals → 0 to -15 points\n  - -10: recent layoffs/restructuring mentioned\n  - -10: agency/freelancer/consultant role\n  - -5: very junior (analyst/coordinator/intern)\n\nTier mapping:\n- 85+ → 'A' (immediate sequence, premium personalization)\n- 70–84 → 'B' (standard sequence)\n- 55–69 → 'C' (low-priority sequence)\n- <55 → 'D' (skip — do NOT email)\n\nALWAYS output strictly valid JSON. No prose. No markdown fences."
+            },
+            {
+              "role": "user",
+              "content": "=Score the following lead.\n\nLEAD:\n- Name: {{ $json.first_name }} {{ $json.last_name }}\n- Title: {{ $json.title }}\n- Company: {{ $json.company_name }}\n- Industry: {{ $json.industry }}\n- Employees: {{ $json.company_size }}\n- Country: {{ $json.country }}\n- LinkedIn: {{ $json.linkedin_url }}\n- Email domain: {{ $json.company_domain }}\n\nReturn JSON in this EXACT schema:\n{\n  \"fit_score\": <0-100 integer>,\n  \"tier\": \"A\"|\"B\"|\"C\"|\"D\",\n  \"reasoning\": \"<1-2 sentences>\",\n  \"pain_hypothesis\": \"<one sentence guessing the lead's likely outbound/sales pipeline pain>\",\n  \"score_breakdown\": {\n     \"title\": <int>,\n     \"industry\": <int>,\n     \"company_size\": <int>,\n     \"geo\": <int>,\n     \"tech\": <int>,\n     \"negatives\": <int (negative number or 0)>\n  }\n}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {
+          "temperature": 0.1,
+          "maxTokens": 600
+        }
+      },
+      "id": "ai-score",
+      "name": "🤖 AI: Score Lead",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [600, 280],
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_WITH_OPENAI_CRED_ID",
+          "name": "OpenAI DropMeds"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse AI output safely and merge back into lead\nconst raw = $input.first().json;\nlet parsed = raw;\n\n// OpenAI node returns either {message:{content}} or direct json\nif (raw && raw.message && raw.message.content) {\n  try { parsed = typeof raw.message.content === 'string' ? JSON.parse(raw.message.content) : raw.message.content; }\n  catch (e) { parsed = { fit_score: 0, tier: 'D', reasoning: 'Parse error: '+e.message, pain_hypothesis: '' }; }\n}\n\n// Merge with original lead from upstream\nconst lead = $('When Executed by Parent').item.json;\n\nreturn [{ json: { ...lead, ...parsed } }];"
+      },
+      "id": "code-merge",
+      "name": "🛠 Merge AI Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 280]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": { "__rl": true, "value": "public", "mode": "list" },
+        "table": { "__rl": true, "value": "dropmeds_leads", "mode": "list" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "fit_score": "={{ $json.fit_score }}",
+            "tier": "={{ $json.tier }}",
+            "qualification_reasoning": "={{ $json.reasoning }}",
+            "pain_hypothesis": "={{ $json.pain_hypothesis }}",
+            "stage": "qualified"
+          },
+          "matchingColumns": ["email"]
+        },
+        "options": {}
+      },
+      "id": "pg-update",
+      "name": "🗄 Postgres: Save Score",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1100, 280],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "### Fallback Prompt\n\nIf the model fails to return valid JSON 3 times, the merge code defaults `fit_score:0, tier:'D'`. The Orchestrator's quality gate will skip this lead automatically.",
+        "height": 180,
+        "width": 320,
+        "color": 3
+      },
+      "id": "note-fallback",
+      "name": "Note: Fallback",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [600, 540]
+    }
+  ],
+  "connections": {
+    "When Executed by Parent": {
+      "main": [[{ "node": "🤖 AI: Score Lead", "type": "main", "index": 0 }]]
+    },
+    "🤖 AI: Score Lead": {
+      "main": [
+        [{ "node": "🛠 Merge AI Score", "type": "main", "index": 0 }],
+        [{ "node": "🛠 Merge AI Score", "type": "main", "index": 0 }]
+      ]
+    },
+    "🛠 Merge AI Score": {
+      "main": [[{ "node": "🗄 Postgres: Save Score", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1", "saveExecutionProgress": true },
+  "tags": [{ "name": "DropMeds" }, { "name": "Qualification" }]
+}

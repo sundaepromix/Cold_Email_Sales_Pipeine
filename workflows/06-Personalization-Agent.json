@@ -1,0 +1,190 @@
+{
+  "name": "06 - Personalization Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## ✨ PERSONALIZATION AGENT\n\nGenerates the single most important asset in cold email: the **first line**.\n\nA strong first line:\n• References a specific, verifiable detail about the prospect/company\n• Connects naturally to a pain DropMeds solves\n• Reads like a human SDR wrote it (no 'I came across…')\n• Stays under 25 words\n\n**Why this exists:** First-line personalization is the #1 predictor of reply rate in 2026. Templates die at the inbox; specificity sells.\n\n**Output:**\n- first_line (string)\n- p_s_line (postscript hook)\n- alt_first_line (variant for A/B test)\n- personalization_quality_score (0-10, agent-graded)",
+        "height": 460,
+        "width": 460,
+        "color": 4
+      },
+      "id": "note-pers-overview",
+      "name": "📌 Personalization Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, -200]
+    },
+    {
+      "parameters": {},
+      "id": "trigger-input",
+      "name": "When Executed by Parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [340, 280]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You are a world-class B2B copywriter and former top-1% SDR who now writes cold-email opening lines for DropMeds. You have studied tens of thousands of replied-to cold emails and know exactly what triggers a 'this person actually researched me' reaction.\n\nIRON RULES:\n1. NEVER start with: 'I came across', 'I noticed', 'I see', 'Hope you're well', 'Quick question', 'Saw your', 'Congrats on', 'Loved your'.\n2. NEVER use generic compliments ('great company', 'impressive growth', 'huge fan').\n3. NEVER fabricate facts. If the brief says 'unknown', do NOT invent.\n4. ALWAYS reference one specific, verifiable detail (a product, a hire, a launch, a metric, a market move).\n5. ALWAYS bridge to a sales/RevOps pain: pipeline gaps, weak reply rates, manual SDR work, deliverability, list quality.\n6. MAX 25 words for first_line, MAX 20 words for p_s_line.\n7. Sound like a sharp human peer, not a vendor. Use contractions. No emojis. No exclamation marks unless quoting.\n8. Output must be PURE JSON. No prose. No markdown.\n\nFIRST-LINE PATTERNS THAT WORK:\n• Observation + implied pain: 'Saw [Company] just opened a London office — usually means the SDR team is 3 quarters behind on EMEA pipeline.'\n• Specific role pain: '[Role] at a 200-person SaaS usually means you're personally reviewing every sequence — that's the part we kill at DropMeds.'\n• Trigger event hook: 'Reading [Company] just closed your Series B — congrats. Outbound usually breaks at this stage.'\n\nQUALITY SCORE RUBRIC (0-10):\n• 9-10: cites a verifiable detail + clean pain bridge + sounds human\n• 7-8: cites a verifiable detail but pain bridge is weak\n• 4-6: generic detail or weak bridge\n• 0-3: invented facts, generic compliments, or template-feel"
+            },
+            {
+              "role": "user",
+              "content": "=Write the personalized opener for this prospect.\n\n## Prospect\nName: {{ $json.first_name }} {{ $json.last_name }}\nTitle: {{ $json.title }}\nCompany: {{ $json.company_name }}\n\n## Prospect Brief (factual — do NOT contradict)\n{{ JSON.stringify($json.prospect_brief) }}\n\n## Pain hypothesis (from qualification)\n{{ $json.pain_hypothesis }}\n\nReturn JSON in this EXACT schema:\n{\n  \"first_line\": \"<≤25 words, no greeting, lands fast>\",\n  \"alt_first_line\": \"<different angle, ≤25 words>\",\n  \"p_s_line\": \"<≤20 words postscript that adds a second hook or a tiny piece of social proof>\",\n  \"personalization_quality_score\": <0-10 integer>,\n  \"angle_used\": \"trigger_event\" | \"role_pain\" | \"observation_pain\" | \"social_proof\" | \"contrarian_take\"\n}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": { "temperature": 0.75, "maxTokens": 500 }
+      },
+      "id": "ai-personalize",
+      "name": "🤖 AI: Write First Line",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [600, 280],
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_WITH_OPENAI_CRED_ID",
+          "name": "OpenAI DropMeds"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('When Executed by Parent').item.json;\nlet p = $input.first().json;\nif (p && p.message && p.message.content) {\n  try { p = typeof p.message.content === 'string' ? JSON.parse(p.message.content) : p.message.content; }\n  catch(e) { p = { first_line:'', alt_first_line:'', p_s_line:'', personalization_quality_score: 0, angle_used:'fallback' }; }\n}\nreturn [{ json: { ...lead, personalization: p } }];"
+      },
+      "id": "code-merge",
+      "name": "🛠 Attach Personalization",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 280]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "pq1",
+              "leftValue": "={{ $json.personalization.personalization_quality_score }}",
+              "rightValue": 6,
+              "operator": { "type": "number", "operation": "gte" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-quality",
+      "name": "🚦 Quality ≥ 6?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1100, 280]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You are the same elite B2B copywriter — now in REWRITE mode. The previous attempt scored below 6/10. Diagnose what failed (generic compliment, invented fact, weak bridge, template feel) and produce a stronger version. Stay strictly within the prospect brief. Output the same JSON schema. Never start with banned phrases. Never invent facts. Increase the quality score honestly only if the new version actually deserves it."
+            },
+            {
+              "role": "user",
+              "content": "=Previous low-quality output:\n{{ JSON.stringify($json.personalization) }}\n\nProspect Brief:\n{{ JSON.stringify($json.prospect_brief) }}\n\nProspect: {{ $json.first_name }} {{ $json.last_name }}, {{ $json.title }} at {{ $json.company_name }}.\n\nRewrite. Return the same JSON schema."
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": { "temperature": 0.85, "maxTokens": 500 }
+      },
+      "id": "ai-rewrite",
+      "name": "🤖 AI: Rewrite (low score)",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [1340, 380],
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_WITH_OPENAI_CRED_ID",
+          "name": "OpenAI DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('🛠 Attach Personalization').item.json;\nlet p = $input.first().json;\nif (p && p.message && p.message.content) {\n  try { p = typeof p.message.content === 'string' ? JSON.parse(p.message.content) : p.message.content; } catch(e) {}\n}\nreturn [{ json: { ...lead, personalization: p } }];"
+      },
+      "id": "code-merge-rewrite",
+      "name": "🛠 Attach Rewrite",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1580, 380]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": { "__rl": true, "value": "public", "mode": "list" },
+        "table": { "__rl": true, "value": "dropmeds_leads", "mode": "list" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "personalization": "={{ JSON.stringify($json.personalization) }}",
+            "stage": "personalized"
+          },
+          "matchingColumns": ["email"]
+        },
+        "options": {}
+      },
+      "id": "pg-update",
+      "name": "🗄 Postgres: Save Personalization",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1820, 280],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "When Executed by Parent": {
+      "main": [[{ "node": "🤖 AI: Write First Line", "type": "main", "index": 0 }]]
+    },
+    "🤖 AI: Write First Line": {
+      "main": [[{ "node": "🛠 Attach Personalization", "type": "main", "index": 0 }]]
+    },
+    "🛠 Attach Personalization": {
+      "main": [[{ "node": "🚦 Quality ≥ 6?", "type": "main", "index": 0 }]]
+    },
+    "🚦 Quality ≥ 6?": {
+      "main": [
+        [{ "node": "🗄 Postgres: Save Personalization", "type": "main", "index": 0 }],
+        [{ "node": "🤖 AI: Rewrite (low score)", "type": "main", "index": 0 }]
+      ]
+    },
+    "🤖 AI: Rewrite (low score)": {
+      "main": [[{ "node": "🛠 Attach Rewrite", "type": "main", "index": 0 }]]
+    },
+    "🛠 Attach Rewrite": {
+      "main": [[{ "node": "🗄 Postgres: Save Personalization", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1", "saveExecutionProgress": true },
+  "tags": [{ "name": "DropMeds" }, { "name": "Personalization" }]
+}

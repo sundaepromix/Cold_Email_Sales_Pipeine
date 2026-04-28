@@ -1,0 +1,227 @@
+{
+  "name": "04 - Enrichment Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 🧠 ENRICHMENT AGENT\n\nBuilds a deep prospect profile by combining:\n• Company website scrape (homepage + /about)\n• LinkedIn snapshot (via Proxycurl or Apify)\n• Recent news / funding / hiring signals (via web_search)\n\nThen an AI node synthesizes everything into a structured `prospect_brief` used by the Personalization Agent to write hyper-relevant first lines.\n\n**Why this exists:** Generic personalization (\"loved your post!\") fails. Real enrichment surfaces specific buying triggers — new VP hires, funding rounds, product launches, expansion announcements — that earn replies.\n\n**Output schema:**\n- company_one_liner\n- company_recent_signal\n- prospect_role_summary\n- prospect_observable_pain\n- relevance_to_dropmeds",
+        "height": 460,
+        "width": 460,
+        "color": 4
+      },
+      "id": "note-enrich-overview",
+      "name": "📌 Enrichment Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, -200]
+    },
+    {
+      "parameters": {},
+      "id": "trigger-input",
+      "name": "When Executed by Parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [340, 280]
+    },
+    {
+      "parameters": {
+        "url": "=https://{{ $json.company_domain }}",
+        "options": {
+          "timeout": 15000,
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "http-website",
+      "name": "🌐 Fetch Company Website",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, 180],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://nubela.co/proxycurl/api/v2/linkedin",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "url", "value": "={{ $('When Executed by Parent').item.json.linkedin_url }}" },
+            { "name": "use_cache", "value": "if-present" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.PROXYCURL_API_KEY }}" }
+          ]
+        },
+        "options": {
+          "timeout": 20000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "http-linkedin",
+      "name": "🔗 Fetch LinkedIn Profile",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, 320],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://serpapi.com/search.json",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "q", "value": "=\"{{ $('When Executed by Parent').item.json.company_name }}\" funding OR hiring OR launch OR acquisition" },
+            { "name": "tbm", "value": "nws" },
+            { "name": "num", "value": "5" },
+            { "name": "api_key", "value": "={{ $env.SERPAPI_KEY }}" }
+          ]
+        },
+        "options": {
+          "timeout": 15000,
+          "response": { "response": { "neverError": true } }
+        }
+      },
+      "id": "http-news",
+      "name": "📰 Fetch Recent News",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, 460],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "id": "merge-sources",
+      "name": "🔀 Merge Sources",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [860, 320]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You are a senior B2B sales researcher and account intelligence analyst at DropMeds. You distill messy, multi-source enrichment data into a sharp, decision-grade prospect brief that an SDR can use to write a personalized first line in under 30 seconds.\n\nYour outputs MUST:\n1. Be FACTUAL — never invent company news, funding rounds, hires, or quotes. If a source is empty/unavailable, say 'unknown' rather than guess.\n2. Be SPECIFIC — generic phrases like 'a leading SaaS company' are forbidden. Use concrete nouns (product names, dollar amounts, headcount, geographies).\n3. Be SHORT — every field is one sentence max.\n4. Surface a BUYING TRIGGER if visible (recent funding, exec hire, product launch, expansion).\n5. Always tie back to DropMeds value: AI cold email automation, lead scoring, deliverability, reply rate lift.\n\nReturn STRICT JSON. No prose. No markdown."
+            },
+            {
+              "role": "user",
+              "content": "=Synthesize this enrichment data into a prospect brief.\n\n## Lead\nName: {{ $('When Executed by Parent').item.json.first_name }} {{ $('When Executed by Parent').item.json.last_name }}\nTitle: {{ $('When Executed by Parent').item.json.title }}\nCompany: {{ $('When Executed by Parent').item.json.company_name }}\nFit score: {{ $('When Executed by Parent').item.json.fit_score }} (Tier {{ $('When Executed by Parent').item.json.tier }})\nPain hypothesis: {{ $('When Executed by Parent').item.json.pain_hypothesis }}\n\n## Website HTML (truncate to first 4000 chars)\n{{ ($('🌐 Fetch Company Website').item.json.data || '').toString().substring(0,4000) }}\n\n## LinkedIn JSON\n{{ JSON.stringify($('🔗 Fetch LinkedIn Profile').item.json).substring(0,3000) }}\n\n## Recent News JSON\n{{ JSON.stringify(($('📰 Fetch Recent News').item.json && $('📰 Fetch Recent News').item.json.news_results) || []).substring(0,2000) }}\n\nReturn JSON in this EXACT schema:\n{\n  \"company_one_liner\": \"<what the company actually does, 1 sentence>\",\n  \"company_recent_signal\": \"<most relevant trigger from news/site, or 'unknown'>\",\n  \"prospect_role_summary\": \"<what this person likely owns at the company>\",\n  \"prospect_observable_pain\": \"<specific pipeline/outbound pain inferred from role + company stage>\",\n  \"relevance_to_dropmeds\": \"<one sentence connecting their pain to DropMeds value>\",\n  \"confidence\": \"high\" | \"medium\" | \"low\"\n}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": { "temperature": 0.3, "maxTokens": 700 }
+      },
+      "id": "ai-synthesize",
+      "name": "🤖 AI: Synthesize Brief",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [1100, 320],
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_WITH_OPENAI_CRED_ID",
+          "name": "OpenAI DropMeds"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('When Executed by Parent').item.json;\nlet brief = $input.first().json;\nif (brief && brief.message && brief.message.content) {\n  try { brief = typeof brief.message.content === 'string' ? JSON.parse(brief.message.content) : brief.message.content; } catch(e) {\n    brief = { company_one_liner:'unknown', company_recent_signal:'unknown', prospect_role_summary:'unknown', prospect_observable_pain:'unknown', relevance_to_dropmeds:'unknown', confidence:'low' };\n  }\n}\nreturn [{ json: { ...lead, prospect_brief: brief } }];"
+      },
+      "id": "code-merge-brief",
+      "name": "🛠 Attach Brief to Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 320]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": { "__rl": true, "value": "public", "mode": "list" },
+        "table": { "__rl": true, "value": "dropmeds_leads", "mode": "list" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "prospect_brief": "={{ JSON.stringify($json.prospect_brief) }}",
+            "stage": "enriched"
+          },
+          "matchingColumns": ["email"]
+        },
+        "options": {}
+      },
+      "id": "pg-update-brief",
+      "name": "🗄 Postgres: Save Brief",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1580, 320],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "When Executed by Parent": {
+      "main": [
+        [
+          { "node": "🌐 Fetch Company Website", "type": "main", "index": 0 },
+          { "node": "🔗 Fetch LinkedIn Profile", "type": "main", "index": 0 },
+          { "node": "📰 Fetch Recent News", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "🌐 Fetch Company Website": {
+      "main": [[{ "node": "🔀 Merge Sources", "type": "main", "index": 0 }]]
+    },
+    "🔗 Fetch LinkedIn Profile": {
+      "main": [[{ "node": "🔀 Merge Sources", "type": "main", "index": 1 }]]
+    },
+    "📰 Fetch Recent News": {
+      "main": [[{ "node": "🔀 Merge Sources", "type": "main", "index": 0 }]]
+    },
+    "🔀 Merge Sources": {
+      "main": [[{ "node": "🤖 AI: Synthesize Brief", "type": "main", "index": 0 }]]
+    },
+    "🤖 AI: Synthesize Brief": {
+      "main": [[{ "node": "🛠 Attach Brief to Lead", "type": "main", "index": 0 }]]
+    },
+    "🛠 Attach Brief to Lead": {
+      "main": [[{ "node": "🗄 Postgres: Save Brief", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1", "saveExecutionProgress": true },
+  "tags": [{ "name": "DropMeds" }, { "name": "Enrichment" }]
+}

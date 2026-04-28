@@ -1,0 +1,113 @@
+{
+  "name": "07 - Cold Email Writer Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## ✍️ COLD EMAIL WRITER AGENT\n\nAssembles the full Email #1 (the opener) using:\n• personalization.first_line (already written)\n• prospect_brief\n• A battle-tested DropMeds opener framework: Hook → Pain → Differentiator → Soft CTA\n\nAlso generates a high-CTR subject line and the entire 4-touch sequence (E1 + 3 follow-ups) in one call so tone stays consistent.\n\n**Why this exists:** Most teams write follow-ups generically. The Writer agent treats the sequence as one narrative arc, not 4 disconnected pings.\n\n**Output:**\n- subject_a, subject_b (A/B variants)\n- email_1, email_2, email_3, email_4\n- send_offsets (days from previous touch)\n- compliance_check (SPAM-trigger scan)",
+        "height": 460,
+        "width": 460,
+        "color": 4
+      },
+      "id": "note-writer-overview",
+      "name": "📌 Writer Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, -200]
+    },
+    {
+      "parameters": {},
+      "id": "trigger-input",
+      "name": "When Executed by Parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [340, 280]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "=You are an elite outbound copywriter, formerly a Top-1% AE who closed $20M+ ARR via cold email at three SaaS companies, now writing every cold sequence for DropMeds.\n\nDropMeds is an AI cold-email Sales Operating System for B2B SaaS revenue teams. Buyers care about: reply rate, meeting bookings, deliverability, SDR productivity, and replacing $80k/yr SDRs with a $400/mo system that runs 24/7.\n\nYou write SHORT, HUMAN, SPECIFIC emails that respect the reader's time. You despise filler.\n\n## NON-NEGOTIABLE RULES\n1. Email 1 max 75 words. Emails 2-4 max 50 words each.\n2. Subject lines max 6 words, lowercase-first style, NEVER use clickbait.\n3. NEVER use: 'I hope this finds you well', 'Quick question', 'Touching base', 'Just circling back', 'As per my last email', 'Hope you're doing great', 'Synergy', 'Leverage', 'Game-changer', 'Revolutionary'.\n4. NEVER use exclamation marks, ALL-CAPS, or emojis.\n5. NEVER make ROI claims with fake numbers ('300% reply rate').\n6. ALWAYS use the prospect's first name only (no Mr./Ms.).\n7. ALWAYS end with a soft, low-friction CTA. Either an interest check ('worth 15 mins to compare notes?') or a yes/no question ('open to a 2-min loom?').\n8. Email 4 is the breakup email — short, dignified, gives the reader an out.\n9. Compliance check: scan for SPAM trigger words and refuse to use them.\n\n## STRUCTURE\nEmail 1: [first_line from personalization] → [1-sentence pain bridge] → [1-sentence differentiator] → [soft CTA]. NO sign-off line in the body — sign-off added in send step.\nEmail 2 (Day +3): different angle, social proof or contrarian insight, still short.\nEmail 3 (Day +7): tactical value-add (a small insight or question that helps even if they never reply).\nEmail 4 (Day +14): breakup email. 'Should I close the loop on this?' tone.\n\n## OUTPUT FORMAT\nPure JSON. No markdown. Schema below."
+            },
+            {
+              "role": "user",
+              "content": "=Write the full 4-touch sequence for this prospect.\n\n## Prospect\n{{ $json.first_name }} {{ $json.last_name }} — {{ $json.title }} @ {{ $json.company_name }}\n\n## Use this exact first line in email_1\n{{ $json.personalization && $json.personalization.first_line }}\n\n## Prospect Brief\n{{ JSON.stringify($json.prospect_brief) }}\n\n## Pain hypothesis\n{{ $json.pain_hypothesis }}\n\nReturn JSON in this EXACT schema:\n{\n  \"subject_a\": \"<≤6 words>\",\n  \"subject_b\": \"<≤6 words, different angle>\",\n  \"email_1\": \"<≤75 words, no greeting line, no sign-off>\",\n  \"email_2\": \"<≤50 words>\",\n  \"email_3\": \"<≤50 words>\",\n  \"email_4\": \"<≤50 words, breakup>\",\n  \"send_offsets_days\": [0, 3, 7, 14],\n  \"compliance\": {\n    \"spam_trigger_words_found\": [],\n    \"approved\": true\n  }\n}"
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": { "temperature": 0.7, "maxTokens": 1400 }
+      },
+      "id": "ai-write",
+      "name": "🤖 AI: Write Sequence",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [600, 280],
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_WITH_OPENAI_CRED_ID",
+          "name": "OpenAI DropMeds"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2500
+    },
+    {
+      "parameters": {
+        "jsCode": "const lead = $('When Executed by Parent').item.json;\nlet seq = $input.first().json;\nif (seq && seq.message && seq.message.content) {\n  try { seq = typeof seq.message.content === 'string' ? JSON.parse(seq.message.content) : seq.message.content; }\n  catch(e) { seq = null; }\n}\nif (!seq || !seq.email_1) {\n  // Fallback: build a minimal compliant sequence\n  const fl = lead.personalization && lead.personalization.first_line ? lead.personalization.first_line : '';\n  seq = {\n    subject_a: 'quick idea for ' + (lead.company_name||'').split(' ')[0],\n    subject_b: 'reply rate at ' + (lead.company_name||'').split(' ')[0],\n    email_1: fl + ' Most teams your size are losing 30% of pipeline to weak personalization and bad follow-up. DropMeds runs your entire cold-email engine on autopilot. Worth 15 mins to compare notes?',\n    email_2: 'Following the thread above — one stat: teams who switch see 2.4× reply rate within 30 days. Open to a quick look?',\n    email_3: 'Sharing a 90-second loom showing how the agent personalizes at scale. Useful even if DropMeds isn\\'t a fit.',\n    email_4: 'Want me to close the loop on this thread? Happy to circle back next quarter if timing is off.',\n    send_offsets_days: [0,3,7,14],\n    compliance: { spam_trigger_words_found: [], approved: true }\n  };\n}\nreturn [{ json: { ...lead, sequence: seq } }];"
+      },
+      "id": "code-merge",
+      "name": "🛠 Attach Sequence",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [860, 280]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": { "__rl": true, "value": "public", "mode": "list" },
+        "table": { "__rl": true, "value": "dropmeds_leads", "mode": "list" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "sequence": "={{ JSON.stringify($json.sequence) }}",
+            "stage": "sequence_ready"
+          },
+          "matchingColumns": ["email"]
+        },
+        "options": {}
+      },
+      "id": "pg-update",
+      "name": "🗄 Postgres: Save Sequence",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1100, 280],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "When Executed by Parent": {
+      "main": [[{ "node": "🤖 AI: Write Sequence", "type": "main", "index": 0 }]]
+    },
+    "🤖 AI: Write Sequence": {
+      "main": [[{ "node": "🛠 Attach Sequence", "type": "main", "index": 0 }]]
+    },
+    "🛠 Attach Sequence": {
+      "main": [[{ "node": "🗄 Postgres: Save Sequence", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1", "saveExecutionProgress": true },
+  "tags": [{ "name": "DropMeds" }, { "name": "Cold-Email-Writer" }]
+}

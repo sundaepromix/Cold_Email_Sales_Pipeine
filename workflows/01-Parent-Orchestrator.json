@@ -1,0 +1,477 @@
+{
+  "name": "01 - Parent Orchestrator (DropMeds Sales OS)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 🎯 PARENT ORCHESTRATOR\n\nThis is the master controller of the entire DropMeds AI Cold Email Sales Operating System.\n\n**Business Value:**\n- Single entry point for all outbound campaigns\n- Coordinates 9 specialized AI sub-agents\n- Enforces ICP filtering, dedupe, and quality gates\n- Provides visibility into every stage of the pipeline\n\n**How it runs:**\n1. CRON triggers daily at 8:00 AM (Mon-Fri)\n2. Manual trigger also supported for ad-hoc campaigns\n3. Webhook trigger for on-demand lead injection\n4. Calls each child workflow in sequence with merged data\n\n**Failure Strategy:**\n- Each child has retry + error branches\n- Errors are logged to Slack #sales-ops-alerts\n- Pipeline continues with remaining valid leads",
+        "height": 420,
+        "width": 460,
+        "color": 4
+      },
+      "id": "note-orch-overview",
+      "name": "📌 Orchestrator Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, -200]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "trigger-cron",
+      "name": "Daily Cron 8AM (Mon-Fri)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [400, 100]
+    },
+    {
+      "parameters": {},
+      "id": "trigger-manual",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [400, 280]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "dropmeds-launch-campaign",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "trigger-webhook",
+      "name": "Webhook: Launch Campaign",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [400, 460],
+      "webhookId": "dropmeds-launch-campaign"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "a1",
+              "name": "campaign_id",
+              "value": "={{ 'CMP-' + $now.format('yyyyMMdd-HHmmss') }}",
+              "type": "string"
+            },
+            {
+              "id": "a2",
+              "name": "icp",
+              "value": "={{ $json.icp || { industry: 'SaaS', employee_range: '50-500', titles: ['VP Sales','Head of Sales','CRO','Director of Revenue Operations'], geos: ['United States','Canada','United Kingdom'], tech_stack: ['HubSpot','Salesforce','Outreach','Apollo'] } }}",
+              "type": "object"
+            },
+            {
+              "id": "a3",
+              "name": "daily_send_limit",
+              "value": "={{ $json.daily_send_limit || 80 }}",
+              "type": "number"
+            },
+            {
+              "id": "a4",
+              "name": "campaign_goal",
+              "value": "Book qualified discovery calls for DropMeds AI sales automation suite",
+              "type": "string"
+            },
+            {
+              "id": "a5",
+              "name": "started_at",
+              "value": "={{ $now.toISO() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "set-campaign-config",
+      "name": "🛠 Set Campaign Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [680, 280]
+    },
+    {
+      "parameters": {
+        "content": "### STAGE 1 → LEAD FINDER\n\nCalls the Lead Finder Agent which uses Apollo / Apify / web scraping to surface raw prospect lists matching the ICP. Returns a normalized array of leads.",
+        "height": 180,
+        "width": 280,
+        "color": 5
+      },
+      "id": "note-stage1",
+      "name": "Note: Stage 1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [920, 100]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_LEAD_FINDER_WF_ID",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "exec-lead-finder",
+      "name": "▶ Lead Finder Agent",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [940, 280]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_QUALIFICATION_WF_ID",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "exec-qualification",
+      "name": "▶ Qualification Agent",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [1160, 280]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.fit_score }}",
+              "rightValue": 70,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-quality-gate",
+      "name": "🚦 IF fit_score ≥ 70",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1380, 280]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_ENRICHMENT_WF_ID",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "exec-enrichment",
+      "name": "▶ Enrichment Agent",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [1600, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_EMAIL_VERIFY_WF_ID",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "exec-email-verify",
+      "name": "▶ Email Verification Agent",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [1820, 200]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c2",
+              "leftValue": "={{ $json.email_status }}",
+              "rightValue": "valid",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-email-valid",
+      "name": "🚦 IF email is valid",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [2040, 200]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_PERSONALIZATION_WF_ID",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "exec-personalization",
+      "name": "▶ Personalization Agent",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [2260, 100]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_COLD_EMAIL_WF_ID",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "exec-cold-email",
+      "name": "▶ Cold Email Writer Agent",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [2480, 100]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_OUTREACH_WF_ID",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "exec-outreach",
+      "name": "▶ Outreach Sender Agent",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [2700, 100]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_FOLLOWUP_WF_ID",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "exec-followup",
+      "name": "▶ Follow-Up Sequence Agent",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [2920, 100]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_CRM_WF_ID",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "exec-crm",
+      "name": "▶ CRM Sync Agent",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [3140, 100]
+    },
+    {
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "REPLACE_WITH_REPORTING_WF_ID",
+          "mode": "id"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "exec-reporting",
+      "name": "▶ Analytics & Reporting Agent",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [3360, 100]
+    },
+    {
+      "parameters": {
+        "channel": "#sales-ops-alerts",
+        "text": "=🚀 *DropMeds campaign {{ $json.campaign_id }} completed*\\n• Leads sourced: {{ $json.total_sourced }}\\n• Qualified: {{ $json.total_qualified }}\\n• Emails sent: {{ $json.emails_sent }}\\n• Replies: {{ $json.replies }}\\n• Meetings booked: {{ $json.meetings_booked }}",
+        "otherOptions": {}
+      },
+      "id": "slack-success",
+      "name": "💬 Slack: Campaign Done",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [3580, 100],
+      "credentials": {
+        "slackApi": {
+          "id": "REPLACE_WITH_SLACK_CRED_ID",
+          "name": "Slack DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#sales-ops-alerts",
+        "text": "=⚠️ Lead skipped (low fit). campaign={{ $('🛠 Set Campaign Config').item.json.campaign_id }} — score={{ $json.fit_score }} — {{ $json.email }}",
+        "otherOptions": {}
+      },
+      "id": "slack-low-fit",
+      "name": "💬 Slack: Low Fit Skipped",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1600, 380],
+      "credentials": {
+        "slackApi": {
+          "id": "REPLACE_WITH_SLACK_CRED_ID",
+          "name": "Slack DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#sales-ops-alerts",
+        "text": "=⚠️ Bounce-risk lead skipped. campaign={{ $('🛠 Set Campaign Config').item.json.campaign_id }} — {{ $json.email }} — status={{ $json.email_status }}",
+        "otherOptions": {}
+      },
+      "id": "slack-bad-email",
+      "name": "💬 Slack: Bad Email Skipped",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [2260, 320],
+      "credentials": {
+        "slackApi": {
+          "id": "REPLACE_WITH_SLACK_CRED_ID",
+          "name": "Slack DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"status\": \"accepted\", \"campaign_id\": $json.campaign_id }"
+      },
+      "id": "respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [3580, 280]
+    }
+  ],
+  "connections": {
+    "Daily Cron 8AM (Mon-Fri)": {
+      "main": [[{ "node": "🛠 Set Campaign Config", "type": "main", "index": 0 }]]
+    },
+    "Manual Trigger": {
+      "main": [[{ "node": "🛠 Set Campaign Config", "type": "main", "index": 0 }]]
+    },
+    "Webhook: Launch Campaign": {
+      "main": [[{ "node": "🛠 Set Campaign Config", "type": "main", "index": 0 }]]
+    },
+    "🛠 Set Campaign Config": {
+      "main": [[{ "node": "▶ Lead Finder Agent", "type": "main", "index": 0 }]]
+    },
+    "▶ Lead Finder Agent": {
+      "main": [[{ "node": "▶ Qualification Agent", "type": "main", "index": 0 }]]
+    },
+    "▶ Qualification Agent": {
+      "main": [[{ "node": "🚦 IF fit_score ≥ 70", "type": "main", "index": 0 }]]
+    },
+    "🚦 IF fit_score ≥ 70": {
+      "main": [
+        [{ "node": "▶ Enrichment Agent", "type": "main", "index": 0 }],
+        [{ "node": "💬 Slack: Low Fit Skipped", "type": "main", "index": 0 }]
+      ]
+    },
+    "▶ Enrichment Agent": {
+      "main": [[{ "node": "▶ Email Verification Agent", "type": "main", "index": 0 }]]
+    },
+    "▶ Email Verification Agent": {
+      "main": [[{ "node": "🚦 IF email is valid", "type": "main", "index": 0 }]]
+    },
+    "🚦 IF email is valid": {
+      "main": [
+        [{ "node": "▶ Personalization Agent", "type": "main", "index": 0 }],
+        [{ "node": "💬 Slack: Bad Email Skipped", "type": "main", "index": 0 }]
+      ]
+    },
+    "▶ Personalization Agent": {
+      "main": [[{ "node": "▶ Cold Email Writer Agent", "type": "main", "index": 0 }]]
+    },
+    "▶ Cold Email Writer Agent": {
+      "main": [[{ "node": "▶ Outreach Sender Agent", "type": "main", "index": 0 }]]
+    },
+    "▶ Outreach Sender Agent": {
+      "main": [[{ "node": "▶ Follow-Up Sequence Agent", "type": "main", "index": 0 }]]
+    },
+    "▶ Follow-Up Sequence Agent": {
+      "main": [[{ "node": "▶ CRM Sync Agent", "type": "main", "index": 0 }]]
+    },
+    "▶ CRM Sync Agent": {
+      "main": [[{ "node": "▶ Analytics & Reporting Agent", "type": "main", "index": 0 }]]
+    },
+    "▶ Analytics & Reporting Agent": {
+      "main": [
+        [
+          { "node": "💬 Slack: Campaign Done", "type": "main", "index": 0 },
+          { "node": "Respond to Webhook", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": [
+    { "name": "DropMeds" },
+    { "name": "Orchestrator" },
+    { "name": "Sales-OS" }
+  ]
+}

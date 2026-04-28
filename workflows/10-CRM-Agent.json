@@ -1,0 +1,176 @@
+{
+  "name": "10 - CRM Sync Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 🔄 CRM SYNC AGENT\n\nKeeps HubSpot (or any CRM) in lockstep with the DropMeds pipeline. Creates/updates contacts, attaches activities, and pushes hot replies as Deals into the appropriate stage.\n\n**Why this exists:** Sales leaders need a single source of truth. Without sync, AEs ignore great leads and the data team can't measure cold-email ROI.\n\n**Sync logic:**\n• Every lead: upsert HubSpot contact (by email)\n• Every send: write engagement (email logged)\n• Every reply: append note + update lifecyclestage\n• Positive reply → create Deal in stage 'Discovery — DropMeds Outbound'\n• DNC / unsubscribe → set HubSpot opt-out properties",
+        "height": 460,
+        "width": 460,
+        "color": 4
+      },
+      "id": "note-crm-overview",
+      "name": "📌 CRM Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-200, -200]
+    },
+    {
+      "parameters": {},
+      "id": "trigger-input",
+      "name": "When Executed by Parent",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [340, 280]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT email, first_name, last_name, title, company_name, company_domain, linkedin_url, fit_score, tier, stage, replied, reply_sentiment, do_not_contact, unsubscribed, campaign_id FROM dropmeds_leads WHERE crm_synced_at IS NULL OR last_touched_at > crm_synced_at OR last_reply_at > crm_synced_at LIMIT 500;",
+        "options": {}
+      },
+      "id": "pg-pending",
+      "name": "🗄 Get Pending Sync",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [600, 280],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "contact",
+        "operation": "upsert",
+        "email": "={{ $json.email }}",
+        "additionalFields": {
+          "firstName": "={{ $json.first_name }}",
+          "lastName": "={{ $json.last_name }}",
+          "jobtitle": "={{ $json.title }}",
+          "company": "={{ $json.company_name }}",
+          "website": "={{ 'https://' + $json.company_domain }}",
+          "lifecyclestage": "={{ $json.replied && $json.reply_sentiment === 'POSITIVE' ? 'salesqualifiedlead' : ($json.replied ? 'lead' : 'subscriber') }}",
+          "customProperties": {
+            "property": [
+              { "property": "dropmeds_fit_score", "value": "={{ $json.fit_score }}" },
+              { "property": "dropmeds_tier", "value": "={{ $json.tier }}" },
+              { "property": "dropmeds_stage", "value": "={{ $json.stage }}" },
+              { "property": "dropmeds_campaign_id", "value": "={{ $json.campaign_id }}" },
+              { "property": "hs_email_optout", "value": "={{ $json.unsubscribed || $json.do_not_contact ? 'true' : 'false' }}" }
+            ]
+          }
+        }
+      },
+      "id": "hubspot-upsert",
+      "name": "📇 HubSpot: Upsert Contact",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.1,
+      "position": [860, 280],
+      "credentials": {
+        "hubspotApi": {
+          "id": "REPLACE_WITH_HUBSPOT_CRED_ID",
+          "name": "HubSpot DropMeds"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "h1",
+              "leftValue": "={{ $('🗄 Get Pending Sync').item.json.replied }}",
+              "rightValue": "true",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            },
+            {
+              "id": "h2",
+              "leftValue": "={{ $('🗄 Get Pending Sync').item.json.reply_sentiment }}",
+              "rightValue": "POSITIVE",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-hot",
+      "name": "🚦 Hot Reply?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1100, 280]
+    },
+    {
+      "parameters": {
+        "resource": "deal",
+        "operation": "create",
+        "additionalFields": {
+          "dealName": "={{ 'DropMeds Outbound — ' + $('🗄 Get Pending Sync').item.json.company_name }}",
+          "stage": "appointmentscheduled",
+          "pipeline": "default",
+          "amount": "10000",
+          "dealtype": "newbusiness",
+          "associatedCompany": "={{ $('🗄 Get Pending Sync').item.json.company_domain }}"
+        }
+      },
+      "id": "hubspot-deal",
+      "name": "📇 HubSpot: Create Deal",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2.1,
+      "position": [1340, 200],
+      "credentials": {
+        "hubspotApi": {
+          "id": "REPLACE_WITH_HUBSPOT_CRED_ID",
+          "name": "HubSpot DropMeds"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE dropmeds_leads SET crm_synced_at = NOW() WHERE email = $1;",
+        "options": { "queryReplacement": "={{ $('🗄 Get Pending Sync').item.json.email }}" }
+      },
+      "id": "pg-mark-synced",
+      "name": "🗄 Mark Synced",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1580, 280],
+      "credentials": {
+        "postgres": {
+          "id": "REPLACE_WITH_POSTGRES_CRED_ID",
+          "name": "Postgres DropMeds"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "When Executed by Parent": {
+      "main": [[{ "node": "🗄 Get Pending Sync", "type": "main", "index": 0 }]]
+    },
+    "🗄 Get Pending Sync": {
+      "main": [[{ "node": "📇 HubSpot: Upsert Contact", "type": "main", "index": 0 }]]
+    },
+    "📇 HubSpot: Upsert Contact": {
+      "main": [[{ "node": "🚦 Hot Reply?", "type": "main", "index": 0 }]]
+    },
+    "🚦 Hot Reply?": {
+      "main": [
+        [{ "node": "📇 HubSpot: Create Deal", "type": "main", "index": 0 }],
+        [{ "node": "🗄 Mark Synced", "type": "main", "index": 0 }]
+      ]
+    },
+    "📇 HubSpot: Create Deal": {
+      "main": [[{ "node": "🗄 Mark Synced", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1", "saveExecutionProgress": true },
+  "tags": [{ "name": "DropMeds" }, { "name": "CRM-Sync" }]
+}
